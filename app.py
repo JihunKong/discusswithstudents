@@ -256,7 +256,7 @@ if not st.session_state.debate_started:
         """, unsafe_allow_html=True)
         if st.button("토론 시작하기", key="start_debate"):
             start_debate()
-            st.experimental_rerun()
+            st.rerun()
 
 # 토론이 시작된 경우
 if st.session_state.debate_started:
@@ -283,7 +283,7 @@ if st.session_state.debate_started:
             st.session_state.messages = []
             st.session_state.debate_started = False
             st.session_state.ai_surrender = False
-            st.experimental_rerun()
+            st.rerun()
     
     # 입력 필드 (항복하지 않았을 경우에만 표시)
     if not st.session_state.ai_surrender:
