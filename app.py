@@ -278,4 +278,4 @@ if st.session_state.debate_started:
                 
                 # 입력 필드 초기화 및 페이지 새로고침
                 st.session_state.user_input = ""
-                st.experimental_rerun()
+                st.rerun()
