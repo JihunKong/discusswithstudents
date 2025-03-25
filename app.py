@@ -169,17 +169,25 @@ def check_repeated_argument(user_input):
     st.session_state[get_session_key('repeated_arguments')].append(user_input)
     return False
 
+# 메시지 개수 제한 함수
+def limit_messages(messages, max_count=20):
+    if len(messages) > max_count:
+        return messages[-max_count:]
+    return messages
+
 # AI 응답 생성 함수
 def get_ai_response(user_input, is_surrender=False):
-    # API 키가 설정되어 있는 경우 Claude API 사용
-    if api_key:
-        try:
-            client = anthropic.Anthropic(api_key=api_key)
-            
-            # 항복 시 프롬프트 추가
-            additional_system = ""
-            if is_surrender:
-                additional_system = """
+    try:
+        # API 키가 설정되어 있는 경우 Claude API 사용
+        if not api_key:
+            return get_fallback_response(user_input, is_surrender)
+
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        # 항복 시 프롬프트 추가
+        additional_system = ""
+        if is_surrender:
+            additional_system = """
 당신은 학생의 논리적이고 체계적인 주장에 완전히 설득되었습니다.
 다음 형식으로 항복 메시지를 작성하세요:
 
@@ -187,37 +195,37 @@ def get_ai_response(user_input, is_surrender=False):
 
 네 주장에 설득되어 항복을 선언합니다. (이후 설득된 이유를 상세히 설명)
 """
-            
-            # 최근 대화 내용만 포함 (컨텍스트 길이 제한)
-            messages = []
-            for msg in st.session_state[get_session_key('claude_messages')][-10:]:
-                messages.append(msg)
-            
-            # 사용자 입력 추가
-            messages.append({"role": "user", "content": user_input})
-            
-            # API 요청
-            with st.spinner("AI가 응답을 생성하는 중..."):
+        
+        # 최근 대화 내용만 포함 (컨텍스트 길이 제한)
+        recent_messages = limit_messages(st.session_state[get_session_key('claude_messages')], 5)
+        
+        # API 요청
+        with st.spinner("AI가 응답을 생성하는 중..."):
+            try:
                 response = client.messages.create(
                     model="claude-3-7-sonnet-20250219",
                     max_tokens=1024,
                     temperature=0.7,
                     system=system_message + additional_system,
-                    messages=messages
+                    messages=recent_messages + [{"role": "user", "content": user_input}]
                 )
-            
-            # 응답 저장
-            st.session_state[get_session_key('claude_messages')].append({"role": "user", "content": user_input})
-            st.session_state[get_session_key('claude_messages')].append({"role": "assistant", "content": response.content[0].text})
-            
-            return response.content[0].text
-            
-        except Exception as e:
-            st.error(f"Claude API 호출 중 오류가 발생했습니다: {e}")
-            # 오류 발생 시 대체 응답 사용
-            return get_fallback_response(user_input, is_surrender)
-    else:
-        # API 키가 없는 경우 대체 응답 사용
+                
+                # 응답 저장 (메시지 개수 제한 적용)
+                st.session_state[get_session_key('claude_messages')] = limit_messages(
+                    st.session_state[get_session_key('claude_messages')] + [
+                        {"role": "user", "content": user_input},
+                        {"role": "assistant", "content": response.content[0].text}
+                    ]
+                )
+                
+                return response.content[0].text
+                
+            except Exception as api_error:
+                st.error(f"API 호출 중 오류가 발생했습니다: {str(api_error)}")
+                return get_fallback_response(user_input, is_surrender)
+                
+    except Exception as e:
+        st.error(f"예상치 못한 오류가 발생했습니다: {str(e)}")
         return get_fallback_response(user_input, is_surrender)
 
 # 대체 응답 생성 함수의 항복 메시지 부분 수정
@@ -275,13 +283,16 @@ def get_fallback_response(user_input, is_surrender=False):
 
 # 토론 시작 함수
 def start_debate():
+    # 세션 상태 초기화
     st.session_state[get_session_key('debate_started')] = True
     st.session_state[get_session_key('start_time')] = datetime.now()
     st.session_state[get_session_key('round_count')] = 0
     st.session_state[get_session_key('ai_surrender')] = False
     st.session_state[get_session_key('claude_messages')] = []
+    st.session_state[get_session_key('messages')] = []
+    st.session_state[get_session_key('repeated_arguments')] = []
     
-    # 초기 메시지 설정 (친근한 말투로 수정)
+    # 초기 메시지 설정
     initial_ai_message = """안녕! 오늘은 'AI로 수행평가를 해도 될까?'라는 주제로 토론해보자. 나는 AI를 수행평가에 활용하는 건 좋지 않다고 생각해. AI를 활용하면 네가 진짜로 배운 것인지 확인하기 어렵고, 학습의 진짜 가치가 훼손될 수 있거든. 또 모든 친구들이 똑같은 AI를 쓸 수 있는 것도 아니라서 불공평한 상황이 생길 수도 있어. 너는 이 주제에 대해 어떻게 생각해? 편하게 얘기해줘."""
     
     st.session_state[get_session_key('messages')].append({"role": "assistant", "content": initial_ai_message})
