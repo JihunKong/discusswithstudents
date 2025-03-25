@@ -79,6 +79,9 @@ if get_session_key('ai_surrender') not in st.session_state:
 if get_session_key('claude_messages') not in st.session_state:
     st.session_state[get_session_key('claude_messages')] = []
 
+if get_session_key('repeated_arguments') not in st.session_state:
+    st.session_state[get_session_key('repeated_arguments')] = []
+
 # 시스템 메시지 설정
 system_message = """
 당신은 '인공지능으로 수행평가를 해도 될까?'라는 주제에 대해 고등학생과 토론합니다.
@@ -90,6 +93,10 @@ system_message = """
 3. 문단을 나누지 말고 한 문단으로 답변하세요.
 4. 질문을 던질 때는 "학생의 의견을 듣고 싶습니다" 같은 공식적인 표현보다 "넌 어떻게 생각해?" 같은 친근한 표현을 사용하세요.
 5. 적절히 구어체 표현과 감정을 섞어 자연스러운 대화를 만드세요.
+6. 학생의 주장이 다음 구조를 따르지 않으면 "주장-근거-근거보강의 구조로 다시 말해줄래?"라고 요청하세요:
+   - 주장: 명확한 입장 표명
+   - 근거: 주장을 뒷받침하는 논리적 이유
+   - 근거 보강: 구체적인 예시, 통계, 연구 자료 등
 
 당신의 반대 입장에 대한 주요 논거:
 1. 학습의 진정한 목적과 과정의 중요성
@@ -98,8 +105,10 @@ system_message = """
 4. 비판적 사고력과 창의성 발달 저해 가능성
 5. 학생들의 AI 의존도 증가 우려
 
-토론은 최대 20분간 진행되며, 학생이 매우 강력한 주장을 펼치거나 당신의 모든 논점을 효과적으로 반박할 경우
-항복을 선언해야 합니다. 항복 시 학생의 논점을 인정하고 자신의 관점이 바뀌었음을 표현하세요.
+토론은 최대 30분간 진행되며, 학생이 매우 강력한 주장을 펼치고 당신의 모든 논점을 효과적으로 반박하며, 
+주장-근거-근거보강의 구조를 잘 지켜 설득력 있게 전개할 경우에만 항복을 선언해야 합니다.
+항복 시에는 반드시 "네 주장에 설득되어 항복을 선언합니다."라는 문구로 시작하여 학생의 논점을 인정하고 
+자신의 관점이 바뀐 이유를 구체적으로 설명하세요.
 """
 
 # 토론 정보 함수
@@ -113,28 +122,64 @@ def get_elapsed_time():
 
 # AI 항복 조건 확인
 def check_surrender_conditions():
-    # 라운드 수에 따른 항복 확률 (라운드가 진행될수록 항복 확률 증가)
-    round_factor = min(0.1 * st.session_state[get_session_key('round_count')], 0.5)
+    # 라운드 수에 따른 항복 확률 (라운드가 진행될수록 항복 확률 점진적 증가)
+    round_factor = min(0.03 * st.session_state[get_session_key('round_count')], 0.2)
     
-    # 시간 경과에 따른 항복 확률 (15분 이상 지나면 항복 확률 크게 증가)
+    # 시간 경과에 따른 항복 확률 (25분 이상 지나면 항복 확률 증가)
     time_factor = 0
     if st.session_state[get_session_key('start_time')]:
         elapsed_minutes = (datetime.now() - st.session_state[get_session_key('start_time')]).total_seconds() / 60
-        if elapsed_minutes > 15:
-            time_factor = 0.4
-        elif elapsed_minutes > 10:
+        if elapsed_minutes > 35:
+            time_factor = 0.3
+        elif elapsed_minutes > 30:
             time_factor = 0.2
+        elif elapsed_minutes > 25:
+            time_factor = 0.1
     
     # 최종 항복 확률 계산
     surrender_probability = round_factor + time_factor
     
-    # 항복 결정 (라운드 7 이상 + 일정 확률)
-    if st.session_state[get_session_key('round_count')] >= 7 and random.random() < surrender_probability:
+    # 항복 결정 (라운드 15 이상 + 일정 확률)
+    if st.session_state[get_session_key('round_count')] >= 15 and random.random() < surrender_probability:
         return True
+    return False
+
+# 억지 주장 반복 체크 함수
+def check_repeated_argument(user_input):
+    # 이전 주장들과 현재 주장을 비교
+    current_words = set(user_input.lower().split())
+    for prev_arg in st.session_state[get_session_key('repeated_arguments')]:
+        prev_words = set(prev_arg.lower().split())
+        # 단어 중복률이 70% 이상이면 반복으로 간주
+        common_words = current_words.intersection(prev_words)
+        if len(common_words) / max(len(current_words), len(prev_words)) > 0.7:
+            return True
+    
+    # 반복이 아닌 경우 현재 주장 저장
+    st.session_state[get_session_key('repeated_arguments')].append(user_input)
     return False
 
 # AI 응답 생성 함수
 def get_ai_response(user_input, is_surrender=False):
+    # 구조화되지 않은 주장 체크
+    if not is_surrender and len(user_input.strip().split()) < 30:  # 간단한 주장이나 짧은 답변
+        return "토론은 '주장-근거-근거보강'의 구조로 진행해야 해. 네 의견에 대한 구체적인 이유와 그것을 뒷받침하는 예시나 자료를 함께 이야기해줄래? 예를 들어 'AI 수행평가는 ~해서 도움이 된다. 그 이유는 ~때문이다. 실제로 ~한 연구나 사례를 보면...' 이런 식으로 말이야!"
+
+    # 억지 주장 반복 체크
+    if not is_surrender and check_repeated_argument(user_input):
+        reset_message = """[토론 리셋 필요]
+
+지금까지 비슷한 주장만 반복하고 있는 것 같아. 토론은 서로의 의견을 듣고 새로운 관점과 근거를 제시하면서 발전해야 하는데, 같은 이야기만 반복하면 진전이 없겠지? 
+
+다시 처음부터 시작하면서 이런 점들을 생각해보는 건 어떨까?
+1. 왜 AI를 수행평가에 활용해야 하는지 구체적인 이유
+2. 그 이유를 뒷받침하는 실제 사례나 연구 자료
+3. 내가 제기한 우려에 대한 해결방안
+
+'토론 다시 시작하기' 버튼을 눌러서 새로운 마음으로 시작해보자!"""
+        st.session_state[get_session_key('ai_surrender')] = True
+        return reset_message
+
     # API 키가 설정되어 있는 경우 Claude API 사용
     if api_key:
         try:
@@ -143,7 +188,7 @@ def get_ai_response(user_input, is_surrender=False):
             # 항복 시 프롬프트 추가
             additional_system = ""
             if is_surrender:
-                additional_system = "\n학생의 주장이 매우 설득력 있어 당신은 항복하기로 했습니다. 학생의 주장을 인정하고 당신의 관점이 어떻게 바뀌었는지 설명하세요. 친근한 말투로 한 문단으로 표현하세요."
+                additional_system = "\n당신은 학생의 논리적이고 체계적인 주장에 완전히 설득되었습니다. '네 주장에 설득되어 항복을 선언합니다.'라는 문구로 시작하여, 어떤 논점이 특히 설득력 있었는지 구체적으로 설명하세요."
             
             # 최근 대화 내용만 포함 (컨텍스트 길이 제한)
             messages = []
@@ -177,15 +222,19 @@ def get_ai_response(user_input, is_surrender=False):
         # API 키가 없는 경우 대체 응답 사용
         return get_fallback_response(user_input, is_surrender)
 
-# 대체 응답 생성 함수 (API 오류 또는 API 키 미설정 시 사용)
+# 대체 응답 생성 함수의 항복 메시지 부분 수정
 def get_fallback_response(user_input, is_surrender=False):
-    # 항복 메시지 (친근한 말투로 수정)
+    # 구조화되지 않은 주장 체크
+    if not is_surrender and len(user_input.strip().split()) < 30:  # 간단한 주장이나 짧은 답변
+        return "토론은 '주장-근거-근거보강'의 구조로 진행해야 해. 네 의견에 대한 구체적인 이유와 그것을 뒷받침하는 예시나 자료를 함께 이야기해줄래? 예를 들어 'AI 수행평가는 ~해서 도움이 된다. 그 이유는 ~때문이다. 실제로 ~한 연구나 사례를 보면...' 이런 식으로 말이야!"
+
+    # 항복 메시지 (더 명시적인 형식으로 수정)
     surrender_responses = [
-        "와, 네 의견을 들으니 내 생각이 바뀌었어. 특히 AI를 활용한 수행평가가 미래 사회에 필요한 역량을 기르는 데 도움된다는 점과 가이드라인으로 공정성을 확보할 수 있다는 주장이 정말 설득력 있더라. AI를 활용하면 디지털 리터러시도 향상되고, 실제 사회에서 사용할 도구를 미리 배울 기회가 된다는 점에 동의해. 결국 중요한 건 AI를 어떻게 활용하느냐인 것 같아. 좋은 토론 고마워!",
+        "[토론 종료 - AI 항복]\n\n네 주장에 설득되어 항복을 선언합니다. 특히 AI를 활용한 수행평가가 미래 사회에 필요한 역량을 기르는 데 도움된다는 점과 가이드라인으로 공정성을 확보할 수 있다는 주장이 정말 설득력 있었어. 네가 제시한 연구 자료와 실제 사례들을 보니, AI를 활용하면 디지털 리터러시도 향상되고 실제 사회에서 사용할 도구를 미리 배울 기회가 된다는 점을 부정할 수 없어. 결국 중요한 건 AI를 어떻게 활용하느냐인 것 같아. 좋은 토론 고마워!",
         
-        "음, 내 생각이 바뀌었어. 네가 말한 AI 활용의 교육적 가치와 미래지향적 학습 방식에 대한 논점이 정말 타당하더라. 특히 AI를 활용하면서도 학생의 사고 과정을 평가할 수 있는 방법이 있고, AI 리터러시 자체를 교육 목표로 삼을 수 있다는 건 내가 미처 생각 못 했던 부분이야. 수행평가에서 AI를 완전히 배제하기보다는 적절한 가이드라인과 함께 활용하는 게 더 현실적이고 교육적으로도 가치 있겠다. 좋은 의견 고마워!",
+        "[토론 종료 - AI 항복]\n\n네 주장에 설득되어 항복을 선언합니다. 네가 제시한 AI 활용의 교육적 가치와 미래지향적 학습 방식에 대한 논점이 매우 타당했어. 특히 AI를 활용하면서도 학생의 사고 과정을 평가할 수 있는 구체적인 방법론과, AI 리터러시 자체를 교육 목표로 삼을 수 있다는 건 내가 미처 생각하지 못했던 부분이야. 네가 보여준 실제 학교 사례들을 보니, 수행평가에서 AI를 완전히 배제하기보다는 적절한 가이드라인과 함께 활용하는 게 더 현실적이고 교육적으로도 가치 있겠어. 좋은 의견 고마워!",
         
-        "네 논리적이고 미래지향적인 관점에 완전히 설득됐어. AI를 수행평가에 활용하는 건 단순한 '부정행위' 문제가 아니라 변화하는 교육 환경과 사회에 적응하는 방법의 문제라는 걸 이제 알겠어. 특히 AI를 활용한 수행평가가 실제 직업 세계를 반영한다는 점과, 중요한 건 결과물이 아니라 AI와 함께 일하는 과정을 평가할 수 있다는 네 주장이 정말 설득력 있었어. 내 입장을 다시 생각하게 해줘서 고마워."
+        "[토론 종료 - AI 항복]\n\n네 주장에 설득되어 항복을 선언합니다. 네가 제시한 논리적이고 미래지향적인 관점과 구체적인 연구 자료들이 내 생각을 완전히 바꾸었어. AI를 수행평가에 활용하는 건 단순한 '부정행위' 문제가 아니라 변화하는 교육 환경과 사회에 적응하는 방법의 문제라는 걸 이제 알겠어. 특히 AI를 활용한 수행평가가 실제 직업 세계를 반영한다는 점과, 중요한 건 결과물이 아니라 AI와 함께 일하는 과정을 평가할 수 있다는 네 주장이 매우 설득력 있었어. 내 입장을 다시 생각하게 해줘서 고마워."
     ]
     
     # 일반 반박 응답 (친근한 말투로 수정)
@@ -255,7 +304,7 @@ if not st.session_state[get_session_key('debate_started')]:
             <h3>토론 안내</h3>
             <p>이 토론에서는 '인공지능으로 수행평가를 해도 될까?'라는 주제로 AI와 토론을 진행합니다.</p>
             <p>당신은 <b>인공지능을 수행평가에 활용하는 것에 찬성하는 입장</b>을 취하게 됩니다.</p>
-            <p>토론은 약 20분간 진행되며, 상대방(AI)을 설득하는 것이 목표입니다.</p>
+            <p>토론은 약 30분간 진행되며, 상대방(AI)을 설득하는 것이 목표입니다.</p>
             <p>충분히 설득력 있는 주장을 펼치면 AI가 항복할 수 있습니다.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -292,13 +341,20 @@ if st.session_state[get_session_key('debate_started')]:
     
     # 입력 필드 (항복하지 않았을 경우에만 표시)
     if not st.session_state[get_session_key('ai_surrender')]:
-        user_input = st.text_area("당신의 주장을 입력하세요:", height=150, key="input_field")
+        # 입력 필드의 초기값을 위한 키 추가
+        if get_session_key('user_input') not in st.session_state:
+            st.session_state[get_session_key('user_input')] = ""
+            
+        user_input = st.text_area("당신의 주장을 입력하세요:", value=st.session_state[get_session_key('user_input')], height=150, key="input_field")
         
         if st.button("의견 제출", key="submit_opinion"):
             if user_input.strip() != "":
                 # 사용자 메시지 추가
                 st.session_state[get_session_key('messages')].append({"role": "user", "content": user_input})
                 st.session_state[get_session_key('round_count')] += 1
+                
+                # 입력창 비우기
+                st.session_state[get_session_key('user_input')] = ""
                 
                 # 항복 조건 확인
                 if check_surrender_conditions():
