@@ -243,25 +243,39 @@ def perplexity_fact_check(claim: str, source_text: str, clients: Dict) -> Dict:
                 
                 ground_content = ground_response.choices[0].message.content
                 
-                # 응답 파싱
-                if 'grounded' in ground_content.lower():
+                # 응답 파싱 개선
+                ground_lower = ground_content.lower()
+                
+                # 다양한 긍정 표현 체크
+                if any(word in ground_lower for word in ['grounded', 'supported', 'verified', '사실', '확인', '입증']):
                     result['is_grounded'] = True
                     result['confidence'] = 0.85
-                elif 'partially' in ground_content.lower():
+                elif any(word in ground_lower for word in ['partially', 'partly', '부분적', '일부']):
                     result['is_grounded'] = True
                     result['confidence'] = 0.5
-                else:
+                elif any(word in ground_lower for word in ['not grounded', 'unsupported', 'false', '거짓', '틀림', '오류']):
                     result['is_grounded'] = False
-                    result['confidence'] = 0.2
+                    result['confidence'] = 0.1
+                else:
+                    # 기본값: 약한 신뢰도
+                    result['is_grounded'] = True
+                    result['confidence'] = 0.3
                 
                 result['explanation'] = ground_content
             except Exception as e:
                 result['explanation'] = f"Groundedness Check 오류: {str(e)}"
         else:
             # Upstage API가 없는 경우 Perplexity 결과만으로 판단
-            if '사실' in search_results or '확인' in search_results or 'true' in search_results.lower():
+            search_lower = search_results.lower()
+            if any(word in search_lower for word in ['사실', '확인', '맞습니다', '정확', 'true', 'correct', 'verified']):
                 result['is_grounded'] = True
                 result['confidence'] = 0.7
+            elif any(word in search_lower for word in ['거짓', '틀림', '오류', 'false', 'incorrect', 'wrong']):
+                result['is_grounded'] = False
+                result['confidence'] = 0.1
+            else:
+                result['is_grounded'] = True
+                result['confidence'] = 0.4
             result['explanation'] = search_results
         
         # 출처 추출 (Perplexity 응답에서)
@@ -275,26 +289,36 @@ def perplexity_fact_check(claim: str, source_text: str, clients: Dict) -> Dict:
     return result
 
 # 코칭 피드백 생성
-def generate_coaching_feedback(text: str, structure: Dict, clients: Dict) -> str:
+def generate_coaching_feedback(text: str, structure: Dict, clients: Dict, position: str = None, topic: str = None) -> str:
     """논증 구조에 대한 코칭 피드백 생성"""
     
-    system_prompt = """당신은 학생들의 토론 논증을 코칭하는 전문 교사입니다.
+    system_prompt = """당신은 학생들의 찬반 토론 논증을 코칭하는 전문 교사입니다.
     
+중요 원칙:
+- 학생이 선택한 입장(찬성 또는 반대)을 명확히 유지하도록 지도합니다
+- 중립적이거나 양면적인 표현("~할 수도 있지만", "부분적으로 인정")을 피하도록 가르칩니다
+- 선택한 입장을 일관되게 지지하는 근거와 보강자료를 제시하도록 돕습니다
+
 역할:
-1. 학생의 논증 구조(주장-근거-보강자료)를 분석하고 개선점을 제시
-2. 논리적 연결성과 설득력을 강화하는 방법 제안
-3. 문장 구조와 표현을 더 명확하고 설득력 있게 개선
-4. 구체적인 예시와 함께 개선된 버전 제시
+1. 학생의 입장에 맞는 주장-근거-보강자료 구조 강화
+2. 선택한 입장을 뒷받침하는 논리적 연결성 개선
+3. 반대 입장을 고려하되, 자신의 입장을 약화시키지 않는 방법 제시
+4. 명확하고 단호한 표현 사용 권장
 
-피드백 구조:
-1. 현재 논증의 강점 인정
-2. 개선이 필요한 부분 지적
-3. 구체적인 개선 방법 제시
-4. 개선된 예시 제공
+피드백 방식:
+- 학생의 입장을 강화하는 방향으로만 조언
+- 애매한 표현을 명확한 표현으로 바꾸는 예시 제공
+- 선택한 입장에 충실한 개선된 논증 예시 제시
 
-말투: 친근하고 격려하는 톤으로, 학생의 노력을 인정하면서 발전 방향 제시"""
+금지사항:
+- "~할 수도 있지만" 같은 양보 표현 제안 금지
+- "부분적으로 인정" 같은 중립적 조언 금지
+- 반대 입장의 타당성을 인정하는 표현 금지"""
 
-    user_prompt = f"""학생의 논증을 분석하고 코칭해주세요:
+    position_str = f"\n학생의 입장: {position}" if position else ""
+    topic_str = f"\n토론 주제: {topic}" if topic else ""
+    
+    user_prompt = f"""학생의 논증을 분석하고 코칭해주세요:{position_str}{topic_str}
 
 논증 내용: {text}
 
@@ -524,9 +548,15 @@ def main():
             if structure['has_reinforcement']:
                 st.session_state.argument_structure['reinforcement'].append("보강자료 추출됨")
             
-            # 코칭 피드백 생성
+            # 코칭 피드백 생성 (입장과 주제 포함)
             with st.spinner("코칭 피드백을 생성하는 중..."):
-                feedback = generate_coaching_feedback(user_input, structure, clients)
+                feedback = generate_coaching_feedback(
+                    user_input, 
+                    structure, 
+                    clients,
+                    position=st.session_state.user_position,
+                    topic=st.session_state.debate_topic
+                )
                 st.session_state.messages.append({"role": "assistant", "content": feedback})
             
             # 출처가 있는 경우 자동 팩트체크
