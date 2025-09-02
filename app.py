@@ -212,7 +212,7 @@ def perplexity_fact_check(claim: str, source_text: str, clients: Dict) -> Dict:
         # 1. Perplexity로 웹 검색 수행
         
         response = clients['perplexity'].chat.completions.create(
-            model="llama-3.1-sonar-large-128k-online",
+            model="sonar-small-online",
             messages=[
                 {
                     "role": "system",
@@ -284,7 +284,8 @@ def perplexity_fact_check(claim: str, source_text: str, clients: Dict) -> Dict:
         result['sources'] = urls[:3]  # 상위 3개 출처만
         
     except Exception as e:
-        result['explanation'] = f"팩트체크 중 오류 발생: {str(e)}"
+        import traceback
+        result['explanation'] = f"팩트체크 중 오류 발생: {str(e)}\n상세: {traceback.format_exc()}"
     
     return result
 
@@ -304,6 +305,11 @@ def generate_coaching_feedback(text: str, structure: Dict, clients: Dict, positi
 2. 선택한 입장을 뒷받침하는 논리적 연결성 개선
 3. 반대 입장을 고려하되, 자신의 입장을 약화시키지 않는 방법 제시
 4. 명확하고 단호한 표현 사용 권장
+
+주의사항:
+- 구체적인 문장 예시를 제공하지 마세요
+- 개선 방법과 방향만 제시하세요
+- 학생이 스스로 생각하고 작성할 수 있도록 조언만 제공
 
 피드백 방식:
 - 학생의 입장을 강화하는 방향으로만 조언
@@ -330,19 +336,16 @@ def generate_coaching_feedback(text: str, structure: Dict, clients: Dict, positi
 다음 형식으로 피드백을 제공해주세요:
 
 📌 **논증 구조 평가**
-- 강점:
-- 개선점:
+- 강점: (현재 잘하고 있는 점)
+- 개선점: (보완이 필요한 부분)
 
-💡 **구체적 개선 제안**
-1. 주장 부분:
-2. 근거 부분:
-3. 보강자료 부분:
+💡 **구체적 개선 방법**
+1. 주장 개선 방법: (예시 없이 방법만 제시)
+2. 근거 보강 방법: (예시 없이 방법만 제시)
+3. 보강자료 활용법: (예시 없이 방법만 제시)
 
-✨ **개선된 예시**
-(학생의 논증을 개선한 버전 제시)
-
-🎯 **다음 단계 제안**
-(학생이 다음에 집중해야 할 포인트)"""
+🎯 **다음 단계**
+(학생이 스스로 연습해야 할 포인트만 제시. 구체적 예시는 제공하지 않음)"""
 
     if 'upstage' not in clients:
         return "Upstage API 키가 설정되지 않았습니다."
