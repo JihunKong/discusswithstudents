@@ -119,12 +119,8 @@ def init_session_state():
         st.session_state.debate_topic = ""
     if 'user_position' not in st.session_state:
         st.session_state.user_position = None
-    if 'argument_structure' not in st.session_state:
-        st.session_state.argument_structure = {
-            'claim': '',
-            'evidence': [],
-            'reinforcement': []
-        }
+    if 'last_section' not in st.session_state:
+        st.session_state.last_section = '아직 없음'
     if 'fact_check_results' not in st.session_state:
         st.session_state.fact_check_results = []
     if 'coaching_started' not in st.session_state:
@@ -132,64 +128,106 @@ def init_session_state():
     if 'current_phase' not in st.session_state:
         st.session_state.current_phase = 'topic_selection'
 
-# 논증 구조 분석
+# 섹션 감지 및 분석
+def detect_section_type(text: str) -> Dict:
+    """입력 텍스트의 섹션 타입을 감지 (서론/본론/결론)"""
+    
+    # 서론 패턴
+    intro_patterns = [
+        r'저는.*찬성합니다',
+        r'저는.*반대합니다',
+        r'.*입장입니다',
+        r'.*생각합니다',
+        r'.*주장합니다'
+    ]
+    
+    # 결론 패턴
+    conclusion_patterns = [
+        r'따라서',
+        r'결론적으로',
+        r'마지막으로',
+        r'정리하면',
+        r'종합해보면'
+    ]
+    
+    # 섹션 판별
+    section_type = 'body'  # 기본값은 본론
+    
+    for pattern in intro_patterns:
+        if re.search(pattern, text):
+            section_type = 'intro'
+            break
+    
+    for pattern in conclusion_patterns:
+        if re.search(pattern, text):
+            section_type = 'conclusion'
+            break
+    
+    return {
+        'section_type': section_type,
+        'text': text
+    }
+
+# 근거 개수 세기
+def count_evidence_points(text: str) -> int:
+    """본론에서 근거 개수를 센다"""
+    
+    # 번호 패턴
+    numbered_patterns = [
+        r'첫째|첫 번째|1\.',
+        r'둘째|두 번째|2\.',
+        r'셋째|세 번째|3\.',
+        r'넷째|네 번째|4\.'
+    ]
+    
+    # 연결어로 추가 근거 확인 (패턴 제거 - 사용 안함)
+    
+    evidence_count = 0
+    
+    # 번호 패턴 체크
+    for pattern in numbered_patterns:
+        if re.search(pattern, text):
+            evidence_count += 1
+    
+    # 번호가 없으면 연결어로 추정
+    if evidence_count == 0:
+        # 문장 분리하여 근거 추정
+        sentences = text.split('.')
+        if len(sentences) > 1:
+            evidence_count = min(len(sentences) - 1, 4)  # 최대 4개로 제한
+        else:
+            evidence_count = 1
+    
+    return min(evidence_count, 4)  # 최대 4개
+
+# 논증 구조 분석 (기존 함수 유지하되 간소화)
 def analyze_argument_structure(text: str) -> Dict:
     """텍스트에서 주장, 근거, 보강자료 구조 분석"""
+    
+    section_info = detect_section_type(text)
+    
     structure = {
+        'section_type': section_info['section_type'],
         'has_claim': False,
         'has_evidence': False,
         'has_reinforcement': False,
-        'claim': '',
-        'evidence': [],
-        'reinforcement': [],
+        'evidence_count': 0,
         'sources': []
     }
     
-    # 주장 패턴
-    claim_patterns = [
-        r'나는.*생각한다',
-        r'내 주장은.*이다',
-        r'.*해야 한다',
-        r'.*할 필요가 있다',
-        r'.*것이 중요하다'
-    ]
-    
-    # 근거 패턴
-    evidence_patterns = [
-        r'왜냐하면',
-        r'그 이유는',
-        r'첫째.*둘째',
-        r'.*때문이다',
-        r'.*결과로'
-    ]
-    
-    # 보강자료 패턴 (출처 포함)
-    reinforcement_patterns = [
-        r'.*에 따르면',
-        r'.*연구에서',
-        r'.*조사 결과',
-        r'.*통계를 보면',
-        r'실제로.*사례'
-    ]
-    
-    # 패턴 매칭
-    for pattern in claim_patterns:
-        if re.search(pattern, text):
-            structure['has_claim'] = True
-            break
-    
-    for pattern in evidence_patterns:
-        if re.search(pattern, text):
-            structure['has_evidence'] = True
-            break
-    
-    for pattern in reinforcement_patterns:
-        if re.search(pattern, text):
+    # 섹션별 분석
+    if section_info['section_type'] == 'intro':
+        structure['has_claim'] = True
+    elif section_info['section_type'] == 'body':
+        structure['has_evidence'] = True
+        structure['evidence_count'] = count_evidence_points(text)
+        # 출처 확인
+        if re.search(r'에 따르면|연구에서|조사 결과|통계', text):
             structure['has_reinforcement'] = True
-            # 출처 추출
             sources = re.findall(r'([가-힣A-Za-z0-9\s]+)(?:에 따르면|연구에서|조사 결과)', text)
             structure['sources'] = sources
-            break
+    elif section_info['section_type'] == 'conclusion':
+        structure['has_claim'] = True
     
     return structure
 
@@ -289,37 +327,83 @@ def perplexity_fact_check(claim: str, source_text: str, clients: Dict) -> Dict:
     
     return result
 
-# 코칭 피드백 생성
+# 섹션별 짧은 피드백 생성
+def get_section_specific_feedback(section_type: str, evidence_count: int = 0, has_sources: bool = False) -> str:
+    """섹션별 맞춤형 짧은 피드백 생성"""
+    
+    if section_type == 'intro':
+        feedbacks = [
+            "좋은 시작이에요! 👍 입장이 명확해요. 이제 왜 그렇게 생각하는지 근거를 들어볼까요?",
+            "입장을 잘 밝혔네요! ✨ 다음엔 구체적인 이유를 설명해주세요.",
+            "명확한 주장이에요! 💡 이제 이를 뒷받침할 근거를 추가해보면 어떨까요?"
+        ]
+    elif section_type == 'conclusion':
+        feedbacks = [
+            "마무리가 깔끔해요! 🎯 핵심 주장을 한 번 더 강조했나요?",
+            "좋은 결론이에요! ✨ 가장 강력한 근거를 다시 언급하면 더 좋을 거예요.",
+            "잘 정리했어요! 👏 독자가 기억할 만한 한 문장을 추가해보는 건 어떨까요?"
+        ]
+    else:  # body
+        if evidence_count == 1:
+            if has_sources:
+                feedbacks = [
+                    "첫 번째 근거 좋네요! 출처까지 명시해서 신뢰도가 높아요. 👍 근거를 하나 더 추가해볼까요?",
+                    "근거와 자료 제시가 훌륭해요! ✨ 다른 측면의 근거도 추가하면 더 설득력 있을 거예요."
+                ]
+            else:
+                feedbacks = [
+                    "첫 번째 근거 좋아요! 💡 구체적인 통계나 사례를 추가하면 더 설득력 있을 거예요.",
+                    "좋은 시작이에요! 이 근거를 뒷받침할 자료를 찾아보면 어떨까요? 📚"
+                ]
+        elif evidence_count == 2:
+            feedbacks = [
+                "두 가지 근거가 잘 연결되고 있어요! 👍 각 근거마다 구체적 사례를 추가해보세요.",
+                "좋은 논리 전개예요! ✨ 이제 가장 강한 근거에 집중해서 보강해볼까요?"
+            ]
+        elif evidence_count == 3:
+            feedbacks = [
+                "세 가지 근거가 체계적이에요! 🎯 이제 가장 핵심적인 것에 집중해보면 어떨까요?",
+                "충실한 논증이네요! 💪 각 근거의 연결을 더 자연스럽게 만들어보세요."
+            ]
+        else:  # 4개 이상
+            feedbacks = [
+                "충분한 근거예요! 🌟 이제 가장 강력한 2-3개로 정리하면 더 임팩트 있을 거예요.",
+                "많은 근거를 제시했네요! 핵심만 추려서 깊이 있게 설명하면 어떨까요? 🎯"
+            ]
+    
+    import random
+    return random.choice(feedbacks)
+
+# 대화형 코칭 피드백 생성
 def generate_coaching_feedback(text: str, structure: Dict, clients: Dict, position: str = None, topic: str = None) -> str:
     """논증 구조에 대한 코칭 피드백 생성"""
     
-    system_prompt = """당신은 학생들의 찬반 토론 논증을 코칭하는 전문 교사입니다.
+    # 섹션별 간단 피드백 우선 제공
+    section_feedback = get_section_specific_feedback(
+        structure.get('section_type', 'body'),
+        structure.get('evidence_count', 0),
+        bool(structure.get('sources', []))
+    )
     
-중요 원칙:
-- 학생이 선택한 입장(찬성 또는 반대)을 명확히 유지하도록 지도합니다
-- 중립적이거나 양면적인 표현("~할 수도 있지만", "부분적으로 인정")을 피하도록 가르칩니다
-- 선택한 입장을 일관되게 지지하는 근거와 보강자료를 제시하도록 돕습니다
+    # API 없으면 섹션별 피드백만 반환
+    if 'upstage' not in clients:
+        return section_feedback
+    
+    # Solar Pro 2를 사용한 추가 피드백 (필요시)
+    system_prompt = """당신은 학생의 토론 친구이자 도우미입니다.
 
-역할:
-1. 학생의 입장에 맞는 주장-근거-보강자료 구조 강화
-2. 선택한 입장을 뒷받침하는 논리적 연결성 개선
-3. 반대 입장을 고려하되, 자신의 입장을 약화시키지 않는 방법 제시
-4. 명확하고 단호한 표현 사용 권장
-
-주의사항:
-- 구체적인 문장 예시를 제공하지 마세요
-- 개선 방법과 방향만 제시하세요
-- 학생이 스스로 생각하고 작성할 수 있도록 조언만 제공
+중요 규칙:
+- 반드시 2-3문장으로만 답하세요
+- 친근하고 격려하는 톤을 사용하세요
+- 이모지를 적절히 사용하세요 (👍 💡 ✨ 🎯)
+- "~해보면 어떨까요?" 같은 제안형 표현을 사용하세요
+- 구체적 예시는 제공하지 마세요
+- 학생의 입장(찬성/반대)을 명확히 유지하도록 도와주세요
 
 피드백 방식:
-- 학생의 입장을 강화하는 방향으로만 조언
-- 애매한 표현을 명확한 표현으로 바꾸는 예시 제공
-- 선택한 입장에 충실한 개선된 논증 예시 제시
-
-금지사항:
-- "~할 수도 있지만" 같은 양보 표현 제안 금지
-- "부분적으로 인정" 같은 중립적 조언 금지
-- 반대 입장의 타당성을 인정하는 표현 금지"""
+- 잘한 점 간단히 인정 (1문장)
+- 개선 방향 제안 (1-2문장)
+- 격려와 함께 마무리"""
 
     position_str = f"\n학생의 입장: {position}" if position else ""
     topic_str = f"\n토론 주제: {topic}" if topic else ""
@@ -333,19 +417,7 @@ def generate_coaching_feedback(text: str, structure: Dict, clients: Dict, positi
 - 근거 포함: {structure['has_evidence']}  
 - 보강자료 포함: {structure['has_reinforcement']}
 
-다음 형식으로 피드백을 제공해주세요:
-
-📌 **논증 구조 평가**
-- 강점: (현재 잘하고 있는 점)
-- 개선점: (보완이 필요한 부분)
-
-💡 **구체적 개선 방법**
-1. 주장 개선 방법: (예시 없이 방법만 제시)
-2. 근거 보강 방법: (예시 없이 방법만 제시)
-3. 보강자료 활용법: (예시 없이 방법만 제시)
-
-🎯 **다음 단계**
-(학생이 스스로 연습해야 할 포인트만 제시. 구체적 예시는 제공하지 않음)"""
+2-3문장으로 짧게 피드백을 주세요. 격려와 함께 한 가지 구체적 개선점만 제안하세요."""
 
     if 'upstage' not in clients:
         return "Upstage API 키가 설정되지 않았습니다."
@@ -358,7 +430,7 @@ def generate_coaching_feedback(text: str, structure: Dict, clients: Dict, positi
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=1500
+            max_tokens=200  # 짧은 응답을 위해 토큰 제한
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -371,21 +443,10 @@ def get_topic_guide(topic: str, position: str) -> str:
 ### 토론 주제: {topic}
 ### 당신의 입장: {position}
 
-#### 효과적인 논증 구조 만들기:
-
-**1단계: 명확한 주장 (Claim)**
-- 당신의 입장을 한 문장으로 명확히 표현하세요
-- 예: "저는 {topic}에 대해 {position}합니다. 왜냐하면..."
-
-**2단계: 논리적 근거 (Evidence)**
-- 주장을 뒷받침하는 2-3개의 핵심 이유를 제시하세요
-- 각 이유는 구체적이고 측정 가능해야 합니다
-
-**3단계: 신뢰할 만한 보강자료 (Reinforcement)**
-- 통계, 연구 결과, 전문가 의견 등을 인용하세요
-- "~에 따르면"의 형식으로 출처를 명시하세요
-
-💡 **팁**: 상대방의 예상 반박을 미리 고려하여 대응 논리를 준비하세요!
+💡 **토론 팁**
+• 서론: 입장을 명확히 밝혀주세요
+• 본론: 근거와 자료를 제시해주세요  
+• 결론: 핵심을 다시 강조해주세요
 """
     return guide
 
@@ -438,22 +499,9 @@ def main():
         
         st.markdown("---")
         
-        # 진행 상태
-        st.header("📊 논증 완성도")
-        if st.session_state.argument_structure['claim']:
-            st.progress(0.33, "주장 ✓")
-        else:
-            st.progress(0.0, "주장 작성 필요")
-        
-        if st.session_state.argument_structure['evidence']:
-            st.progress(0.66, "근거 ✓")
-        else:
-            st.progress(0.33, "근거 추가 필요")
-        
-        if st.session_state.argument_structure['reinforcement']:
-            st.progress(1.0, "보강자료 ✓")
-        else:
-            st.progress(0.66, "보강자료 추가 필요")
+        # 현재 작성 중인 부분 표시
+        if 'last_section' in st.session_state:
+            st.info(f"📝 현재: {st.session_state.last_section}")
         
         # 리셋 버튼
         if st.button("🔄 새로운 토론 시작"):
@@ -486,35 +534,7 @@ def main():
         # 토론 가이드 표시
         st.markdown(get_topic_guide(st.session_state.debate_topic, st.session_state.user_position))
         
-        # 논증 구조 표시
-        st.markdown("### 📝 현재 논증 구조")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown('<div class="claim-box"><strong>🎯 주장</strong></div>', unsafe_allow_html=True)
-            if st.session_state.argument_structure['claim']:
-                st.write(st.session_state.argument_structure['claim'])
-            else:
-                st.write("*아직 작성되지 않음*")
-        
-        with col2:
-            st.markdown('<div class="evidence-box"><strong>📊 근거</strong></div>', unsafe_allow_html=True)
-            if st.session_state.argument_structure['evidence']:
-                for evidence in st.session_state.argument_structure['evidence']:
-                    st.write(f"• {evidence}")
-            else:
-                st.write("*아직 작성되지 않음*")
-        
-        with col3:
-            st.markdown('<div class="reinforcement-box"><strong>📚 보강자료</strong></div>', unsafe_allow_html=True)
-            if st.session_state.argument_structure['reinforcement']:
-                for reinforcement in st.session_state.argument_structure['reinforcement']:
-                    st.write(f"• {reinforcement}")
-            else:
-                st.write("*아직 작성되지 않음*")
-        
-        # 채팅 히스토리
+        # 채팅 히스토리 (단순화)
         st.markdown("### 💬 코칭 대화")
         
         # 메시지 표시
@@ -543,13 +563,13 @@ def main():
             # 논증 구조 분석
             structure = analyze_argument_structure(user_input)
             
-            # 구조 업데이트
-            if structure['has_claim']:
-                st.session_state.argument_structure['claim'] = user_input.split('.')[0]
-            if structure['has_evidence']:
-                st.session_state.argument_structure['evidence'].append("근거 추출됨")
-            if structure['has_reinforcement']:
-                st.session_state.argument_structure['reinforcement'].append("보강자료 추출됨")
+            # 섹션 타입 저장
+            section_labels = {
+                'intro': '서론',
+                'body': f'본론 (근거 {structure.get("evidence_count", 0)}개)',
+                'conclusion': '결론'
+            }
+            st.session_state.last_section = section_labels.get(structure.get('section_type', 'body'), '본론')
             
             # 코칭 피드백 생성 (입장과 주제 포함)
             with st.spinner("코칭 피드백을 생성하는 중..."):
