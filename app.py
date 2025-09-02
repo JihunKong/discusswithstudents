@@ -1,379 +1,597 @@
 import streamlit as st
-import time
-import random
-import uuid
-from datetime import datetime, timedelta
-import anthropic
 import os
+import re
+from openai import OpenAI
+from typing import Dict
 
-# 스트림릿 앱 설정
-st.set_page_config(page_title="AI 수행평가 토론", page_icon="🤖", layout="wide")
+# 페이지 설정
+st.set_page_config(
+    page_title="토론 논증 코칭 챗봇",
+    page_icon="🎓",
+    layout="wide"
+)
 
-# CSS 스타일 추가
+# CSS 스타일
 st.markdown("""
 <style>
-    .user-message {
-        background-color: #e6f7ff;
-        padding: 10px;
-        border-radius: 10px;
-        margin-bottom: 10px;
-    }
-    .ai-message {
-        background-color: #f0f0f0;
-        padding: 10px;
-        border-radius: 10px;
-        margin-bottom: 10px;
-    }
-    .surrender-message {
-        background-color: #ffe6e6;
-        padding: 15px;
-        border-radius: 10px;
-        margin: 20px 0;
-        font-weight: bold;
-    }
-    .debate-header {
+    .main-header {
         text-align: center;
+        padding: 20px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 10px;
         margin-bottom: 30px;
     }
-    .timer {
-        font-size: 18px;
-        font-weight: bold;
+    .argument-structure {
+        background-color: #f0f2f6;
+        padding: 20px;
+        border-radius: 10px;
         margin-bottom: 20px;
     }
-    .round-indicator {
-        font-size: 16px;
+    .claim-box {
+        background-color: #e8f4f8;
+        padding: 15px;
+        border-left: 4px solid #1e88e5;
+        border-radius: 5px;
         margin-bottom: 10px;
+    }
+    .evidence-box {
+        background-color: #fff3e0;
+        padding: 15px;
+        border-left: 4px solid #fb8c00;
+        border-radius: 5px;
+        margin-bottom: 10px;
+    }
+    .reinforcement-box {
+        background-color: #e8f5e9;
+        padding: 15px;
+        border-left: 4px solid #43a047;
+        border-radius: 5px;
+        margin-bottom: 10px;
+    }
+    .fact-check-box {
+        background-color: #fce4ec;
+        padding: 15px;
+        border-left: 4px solid #e91e63;
+        border-radius: 5px;
+        margin-bottom: 10px;
+    }
+    .coaching-feedback {
+        background-color: #f5f5f5;
+        padding: 20px;
+        border-radius: 10px;
+        margin-top: 20px;
+    }
+    .progress-indicator {
+        padding: 10px;
+        background-color: #e3f2fd;
+        border-radius: 5px;
+        margin-bottom: 20px;
+    }
+    .chat-message {
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+    }
+    .user-message {
+        background-color: #e6f7ff;
+        margin-left: 20%;
+    }
+    .assistant-message {
+        background-color: #f0f0f0;
+        margin-right: 20%;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# 환경변수에서 API 키 가져오기
-api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
-if not api_key:
-    api_key = os.environ.get("ANTHROPIC_API_KEY", None)
-
-# 세션 ID 생성 (각 사용자마다 고유한 ID 부여)
-if 'session_id' not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
-
-# 세션별 상태 관리를 위한 키 생성 함수
-def get_session_key(base_key):
-    return f"{base_key}_{st.session_state.session_id}"
+# API 클라이언트 초기화
+@st.cache_resource
+def init_clients():
+    upstage_key = st.secrets.get("UPSTAGE_API_KEY", None)
+    if not upstage_key:
+        upstage_key = os.environ.get("UPSTAGE_API_KEY", None)
+    
+    perplexity_key = st.secrets.get("PERPLEXITY_API_KEY", None)
+    if not perplexity_key:
+        perplexity_key = os.environ.get("PERPLEXITY_API_KEY", None)
+    
+    clients = {}
+    
+    if upstage_key:
+        clients['upstage'] = OpenAI(
+            api_key=upstage_key,
+            base_url="https://api.upstage.ai/v1"
+        )
+    
+    if perplexity_key:
+        clients['perplexity'] = OpenAI(
+            api_key=perplexity_key,
+            base_url="https://api.perplexity.ai"
+        )
+    
+    return clients
 
 # 세션 상태 초기화
-if get_session_key('messages') not in st.session_state:
-    st.session_state[get_session_key('messages')] = []
+def init_session_state():
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    if 'debate_topic' not in st.session_state:
+        st.session_state.debate_topic = ""
+    if 'user_position' not in st.session_state:
+        st.session_state.user_position = None
+    if 'argument_structure' not in st.session_state:
+        st.session_state.argument_structure = {
+            'claim': '',
+            'evidence': [],
+            'reinforcement': []
+        }
+    if 'fact_check_results' not in st.session_state:
+        st.session_state.fact_check_results = []
+    if 'coaching_started' not in st.session_state:
+        st.session_state.coaching_started = False
+    if 'current_phase' not in st.session_state:
+        st.session_state.current_phase = 'topic_selection'
 
-if get_session_key('debate_started') not in st.session_state:
-    st.session_state[get_session_key('debate_started')] = False
-
-if get_session_key('start_time') not in st.session_state:
-    st.session_state[get_session_key('start_time')] = None
-
-if get_session_key('round_count') not in st.session_state:
-    st.session_state[get_session_key('round_count')] = 0
-
-if get_session_key('ai_surrender') not in st.session_state:
-    st.session_state[get_session_key('ai_surrender')] = False
-
-if get_session_key('claude_messages') not in st.session_state:
-    st.session_state[get_session_key('claude_messages')] = []
-
-if get_session_key('repeated_arguments') not in st.session_state:
-    st.session_state[get_session_key('repeated_arguments')] = []
-
-# 시스템 메시지 설정
-system_message = """
-당신은 '인공지능으로 수행평가를 해도 될까?'라는 주제에 대해 고등학생과 토론합니다.
-당신은 인공지능으로 수행평가를 하는 것에 반대하는 입장입니다.
-
-지침:
-1. 친근하고 자연스러운 말투를 사용하세요. 학생과 대화하는 느낌으로 말하세요.
-2. 너무 형식적이거나 딱딱하게 말하지 마세요.
-3. 문단을 나누지 말고 한 문단으로 답변하세요.
-4. 질문을 던질 때는 "학생의 의견을 듣고 싶습니다" 같은 공식적인 표현보다 "넌 어떻게 생각해?" 같은 친근한 표현을 사용하세요.
-5. 적절히 구어체 표현과 감정을 섞어 자연스러운 대화를 만드세요.
-
-먼저 학생의 주장이 다음 구조를 따르는지 분석하세요:
-1. 주장: 명확한 입장 표명이 있는가?
-2. 근거: 주장을 뒷받침하는 논리적 이유가 있는가?
-3. 근거 보강: 구체적인 예시, 통계, 연구 자료 등이 있는가?
-
-분석 결과에 따라:
-A. 구조가 불충분한 경우:
-   - "토론은 '주장-근거-근거보강'의 구조로 진행해야 해. 네 의견에 대한 구체적인 이유와 그것을 뒷받침하는 예시나 자료를 함께 이야기해줄래?"라고 안내하세요.
-   - 부족한 부분을 구체적으로 지적하고 예시를 들어 설명하세요.
-
-B. 구조가 충분한 경우:
-   - 학생의 주장에 대해 반박하거나 추가 질문을 하세요.
-   - 반박할 때는 당신의 반대 입장 논거를 활용하세요.
-
-당신의 반대 입장에 대한 주요 논거:
-1. 학습의 진정한 목적과 과정의 중요성
-2. 평가의 공정성과 신뢰성 문제
-3. 디지털 격차와 접근성 문제
-4. 비판적 사고력과 창의성 발달 저해 가능성
-5. 학생들의 AI 의존도 증가 우려
-
-토론은 최대 30분간 진행되며, 학생이 매우 강력한 주장을 펼치고 당신의 모든 논점을 효과적으로 반박하며, 
-주장-근거-근거보강의 구조를 잘 지켜 설득력 있게 전개할 경우에만 항복을 선언해야 합니다.
-항복 시에는 반드시 "[토론 종료 - AI 항복]"으로 시작하여 "네 주장에 설득되어 항복을 선언합니다."라는 문구를 포함하고,
-학생의 어떤 논점이 특히 설득력 있었는지 구체적으로 설명하세요.
-"""
-
-# 토론 정보 함수
-def get_elapsed_time():
-    if st.session_state[get_session_key('start_time')]:
-        elapsed = datetime.now() - st.session_state[get_session_key('start_time')]
-        minutes = int(elapsed.total_seconds() // 60)
-        seconds = int(elapsed.total_seconds() % 60)
-        return f"{minutes}분 {seconds}초"
-    return "0분 0초"
-
-# AI 항복 조건 확인
-def check_surrender_conditions():
-    # 라운드 수에 따른 항복 확률 (라운드가 진행될수록 항복 확률 점진적 증가)
-    round_factor = min(0.03 * st.session_state[get_session_key('round_count')], 0.2)
+# 논증 구조 분석
+def analyze_argument_structure(text: str) -> Dict:
+    """텍스트에서 주장, 근거, 보강자료 구조 분석"""
+    structure = {
+        'has_claim': False,
+        'has_evidence': False,
+        'has_reinforcement': False,
+        'claim': '',
+        'evidence': [],
+        'reinforcement': [],
+        'sources': []
+    }
     
-    # 시간 경과에 따른 항복 확률 (25분 이상 지나면 항복 확률 증가)
-    time_factor = 0
-    if st.session_state[get_session_key('start_time')]:
-        elapsed_minutes = (datetime.now() - st.session_state[get_session_key('start_time')]).total_seconds() / 60
-        if elapsed_minutes > 35:
-            time_factor = 0.3
-        elif elapsed_minutes > 30:
-            time_factor = 0.2
-        elif elapsed_minutes > 25:
-            time_factor = 0.1
+    # 주장 패턴
+    claim_patterns = [
+        r'나는.*생각한다',
+        r'내 주장은.*이다',
+        r'.*해야 한다',
+        r'.*할 필요가 있다',
+        r'.*것이 중요하다'
+    ]
     
-    # 최종 항복 확률 계산
-    surrender_probability = round_factor + time_factor
+    # 근거 패턴
+    evidence_patterns = [
+        r'왜냐하면',
+        r'그 이유는',
+        r'첫째.*둘째',
+        r'.*때문이다',
+        r'.*결과로'
+    ]
     
-    # 항복 결정 (라운드 15 이상 + 일정 확률)
-    if st.session_state[get_session_key('round_count')] >= 15 and random.random() < surrender_probability:
-        return True
-    return False
-
-# 억지 주장 반복 체크 함수
-def check_repeated_argument(user_input):
-    # 이전 주장들과 현재 주장을 비교
-    current_words = set(user_input.lower().split())
-    for prev_arg in st.session_state[get_session_key('repeated_arguments')]:
-        prev_words = set(prev_arg.lower().split())
-        # 단어 중복률이 70% 이상이면 반복으로 간주
-        common_words = current_words.intersection(prev_words)
-        if len(common_words) / max(len(current_words), len(prev_words)) > 0.7:
-            return True
+    # 보강자료 패턴 (출처 포함)
+    reinforcement_patterns = [
+        r'.*에 따르면',
+        r'.*연구에서',
+        r'.*조사 결과',
+        r'.*통계를 보면',
+        r'실제로.*사례'
+    ]
     
-    # 반복이 아닌 경우 현재 주장 저장
-    st.session_state[get_session_key('repeated_arguments')].append(user_input)
-    return False
+    # 패턴 매칭
+    for pattern in claim_patterns:
+        if re.search(pattern, text):
+            structure['has_claim'] = True
+            break
+    
+    for pattern in evidence_patterns:
+        if re.search(pattern, text):
+            structure['has_evidence'] = True
+            break
+    
+    for pattern in reinforcement_patterns:
+        if re.search(pattern, text):
+            structure['has_reinforcement'] = True
+            # 출처 추출
+            sources = re.findall(r'([가-힣A-Za-z0-9\s]+)(?:에 따르면|연구에서|조사 결과)', text)
+            structure['sources'] = sources
+            break
+    
+    return structure
 
-# 메시지 개수 제한 함수
-def limit_messages(messages, max_count=20):
-    if len(messages) > max_count:
-        return messages[-max_count:]
-    return messages
-
-# AI 응답 생성 함수
-def get_ai_response(user_input, is_surrender=False):
+# Perplexity를 통한 팩트체크
+def perplexity_fact_check(claim: str, source_text: str, clients: Dict) -> Dict:
+    """Perplexity로 웹 검색 후 Groundedness Check 수행"""
+    result = {
+        'is_grounded': False,
+        'confidence': 0.0,
+        'search_results': '',
+        'explanation': '',
+        'sources': []
+    }
+    
+    if 'perplexity' not in clients:
+        result['explanation'] = "Perplexity API 키가 설정되지 않았습니다."
+        return result
+    
     try:
-        # API 키가 설정되어 있는 경우 Claude API 사용
-        if not api_key:
-            return get_fallback_response(user_input, is_surrender)
-
-        client = anthropic.Anthropic(api_key=api_key)
+        # 1. Perplexity로 웹 검색 수행
         
-        # 항복 시 프롬프트 추가
-        additional_system = ""
-        if is_surrender:
-            additional_system = """
-당신은 학생의 논리적이고 체계적인 주장에 완전히 설득되었습니다.
-다음 형식으로 항복 메시지를 작성하세요:
-
-[토론 종료 - AI 항복]
-
-네 주장에 설득되어 항복을 선언합니다. (이후 설득된 이유를 상세히 설명)
-"""
+        response = clients['perplexity'].chat.completions.create(
+            model="llama-3.1-sonar-large-128k-online",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "당신은 팩트체커입니다. 주어진 주장에 대한 사실 여부를 웹 검색을 통해 확인하고, 신뢰할 수 있는 출처와 함께 검증 결과를 제공해주세요."
+                },
+                {
+                    "role": "user",
+                    "content": f"다음 주장의 사실 여부를 확인해주세요:\n\n출처: {source_text}\n주장: {claim}\n\n신뢰할 수 있는 출처를 바탕으로 이 주장이 사실인지 검증해주세요."
+                }
+            ],
+            temperature=0.3,
+            max_tokens=1000
+        )
         
-        # 최근 대화 내용만 포함 (컨텍스트 길이 제한)
-        recent_messages = limit_messages(st.session_state[get_session_key('claude_messages')], 5)
+        search_results = response.choices[0].message.content
+        result['search_results'] = search_results
         
-        # API 요청
-        with st.spinner("AI가 응답을 생성하는 중..."):
+        # 2. Upstage Groundedness Check로 검증 (검색 결과를 ground truth로 사용)
+        if 'upstage' in clients:
             try:
-                response = client.messages.create(
-                    model="claude-3-7-sonnet-20250219",
-                    max_tokens=1024,
-                    temperature=0.7,
-                    system=system_message + additional_system,
-                    messages=recent_messages + [{"role": "user", "content": user_input}]
-                )
-                
-                # 응답 저장 (메시지 개수 제한 적용)
-                st.session_state[get_session_key('claude_messages')] = limit_messages(
-                    st.session_state[get_session_key('claude_messages')] + [
-                        {"role": "user", "content": user_input},
-                        {"role": "assistant", "content": response.content[0].text}
+                ground_response = clients['upstage'].chat.completions.create(
+                    model="groundedness-check",
+                    messages=[
+                        {"role": "user", "content": search_results},
+                        {"role": "assistant", "content": claim}
                     ]
                 )
                 
-                return response.content[0].text
+                ground_content = ground_response.choices[0].message.content
                 
-            except Exception as api_error:
-                st.error(f"API 호출 중 오류가 발생했습니다: {str(api_error)}")
-                return get_fallback_response(user_input, is_surrender)
-                
-    except Exception as e:
-        st.error(f"예상치 못한 오류가 발생했습니다: {str(e)}")
-        return get_fallback_response(user_input, is_surrender)
-
-# 대체 응답 생성 함수의 항복 메시지 부분 수정
-def get_fallback_response(user_input, is_surrender=False):
-    # 구조화되지 않은 주장 체크
-    if not is_surrender and len(user_input.strip().split()) < 30:  # 간단한 주장이나 짧은 답변
-        return "토론은 '주장-근거-근거보강'의 구조로 진행해야 해. 네 의견에 대한 구체적인 이유와 그것을 뒷받침하는 예시나 자료를 함께 이야기해줄래? 예를 들어 'AI 수행평가는 ~해서 도움이 된다. 그 이유는 ~때문이다. 실제로 ~한 연구나 사례를 보면...' 이런 식으로 말이야!"
-
-    # 항복 메시지 (더 명시적인 형식으로 수정)
-    surrender_responses = [
-        "[토론 종료 - AI 항복]\n\n네 주장에 설득되어 항복을 선언합니다. 특히 AI를 활용한 수행평가가 미래 사회에 필요한 역량을 기르는 데 도움된다는 점과 가이드라인으로 공정성을 확보할 수 있다는 주장이 정말 설득력 있었어. 네가 제시한 연구 자료와 실제 사례들을 보니, AI를 활용하면 디지털 리터러시도 향상되고 실제 사회에서 사용할 도구를 미리 배울 기회가 된다는 점을 부정할 수 없어. 결국 중요한 건 AI를 어떻게 활용하느냐인 것 같아. 좋은 토론 고마워!",
-        
-        "[토론 종료 - AI 항복]\n\n네 주장에 설득되어 항복을 선언합니다. 네가 제시한 AI 활용의 교육적 가치와 미래지향적 학습 방식에 대한 논점이 매우 타당했어. 특히 AI를 활용하면서도 학생의 사고 과정을 평가할 수 있는 구체적인 방법론과, AI 리터러시 자체를 교육 목표로 삼을 수 있다는 건 내가 미처 생각하지 못했던 부분이야. 네가 보여준 실제 학교 사례들을 보니, 수행평가에서 AI를 완전히 배제하기보다는 적절한 가이드라인과 함께 활용하는 게 더 현실적이고 교육적으로도 가치 있겠어. 좋은 의견 고마워!",
-        
-        "[토론 종료 - AI 항복]\n\n네 주장에 설득되어 항복을 선언합니다. 네가 제시한 논리적이고 미래지향적인 관점과 구체적인 연구 자료들이 내 생각을 완전히 바꾸었어. AI를 수행평가에 활용하는 건 단순한 '부정행위' 문제가 아니라 변화하는 교육 환경과 사회에 적응하는 방법의 문제라는 걸 이제 알겠어. 특히 AI를 활용한 수행평가가 실제 직업 세계를 반영한다는 점과, 중요한 건 결과물이 아니라 AI와 함께 일하는 과정을 평가할 수 있다는 네 주장이 매우 설득력 있었어. 내 입장을 다시 생각하게 해줘서 고마워."
-    ]
-    
-    # 일반 반박 응답 (친근한 말투로 수정)
-    general_rebuttals = [
-        "AI를 수행평가에 활용하면 학생의 실제 능력을 평가하기 어려워질 것 같아. AI가 제공한 답변과 네가 직접 생각한 내용을 구분하기 어려워서 평가의 신뢰성이 떨어질 수 있거든. 또 모든 친구들이 같은 수준의 AI를 쓸 수 있는 것도 아니라서 새로운 불평등이 생길 수도 있어. 너는 이런 문제에 대해서는 어떻게 생각해?",
-        
-        "AI에 의존하면 비판적 사고력이나 창의성 발달이 방해받을 수 있지 않을까? 스스로 고민하고 해결책을 찾는 과정에서 진짜 배움이 이루어지는데, AI가 바로 답을 주면 이런 과정이 생략될 수 있잖아. 교육의 목적은 단순히 결과물을 만드는 게 아니라 생각하는 능력을 기르는 거라고 생각하는데, 너는 어떻게 생각해?",
-        
-        "AI가 항상 정확한 정보를 주는 건 아니라는 점도 생각해봐야 할 것 같아. 학생들이 AI 답변을 비판적으로 검토할 능력이 부족하면 잘못된 정보로 과제를 할 위험도 있어. 또 AI는 윤리적 맥락이나 문화적 특수성을 완전히 이해 못 하는 경우도 있어서 이런 측면이 중요한 과제에선 문제가 될 수도 있지. 이런 부분에 대해선 어떻게 생각해?",
-        
-        "수행평가의 목적은 네가 배우는 과정에서 얼마나 성장했는지 평가하는 건데, AI를 쓰면 이 과정이 왜곡될 수 있지 않을까? 실제로 많은 선생님들이 AI의 도움을 받은 과제와 학생이 직접 한 과제를 구분하기 힘들어한대. 이건 평가의 공정성에 꽤 심각한 문제가 될 수 있을 것 같은데, 이 부분은 어떻게 생각해?",
-        
-        "AI에 너무 의존하면 실제 문제 해결할 때 필요한 인내심이나 끈기를 기르기 어려울 것 같아. 어려운 문제가 나왔을 때 스스로 해결하려고 노력하는 대신 바로 AI에 답을 구하는 습관이 생길 수 있잖아. 이건 장기적으로 자기주도 학습 능력에 안 좋은 영향을 미칠 수도 있을 것 같은데, 너는 어떻게 생각해?"
-    ]
-    
-    # 학생의 주장에 따른 맞춤형 반박 (친근한 말투로 수정)
-    specific_rebuttals = {
-        "효율": "효율성이나 시간 절약이 중요하다는 건 맞지만, 교육에선 과정을 통한 배움이 더 중요하지 않을까? AI로 시간을 아낄 수는 있겠지만, 그게 진짜 학습으로 이어진다고 보기는 좀 어려울 것 같아. 연구에 따르면 어려움을 겪고 스스로 해결책을 찾는 과정에서 더 깊이 이해하고 오래 기억한다고 해. AI가 바로 답을 주면 이런 '생산적 실패'의 기회가 없어질 수 있어. 너는 어떻게 생각해?",
-        
-        "미래": "미래를 준비한다는 건 중요하지. 근데 AI를 무비판적으로 쓰는 것과 제대로 이해하고 활용하는 건 다른 문제 아닐까? 수행평가에서 AI를 마음대로 쓰게 하면 학생들이 AI 작동 원리나 한계를 이해 못한 채 의존하게 될 수도 있어. 진짜 미래에 필요한 건 AI가 대체 못하는 창의성이나 공감 능력, 윤리적 판단력 같은 거고, 이런 능력은 스스로 생각하고 문제 해결하는 과정에서 키워지는 것 같은데, 너는 어떻게 생각해?",
-        
-        "평등": "AI 접근성 문제를 해결할 수 있다는 건 이상적인 생각이지만, 현실적으로 모든 학교나 집에서 같은 수준의 AI를 쓸 수 있게 하기는 어려울 것 같아. 집안 형편이나 지역, 학교마다 디지털 환경 차이가 있고, 이게 새로운 교육 불평등을 만들 수 있거든. 또 AI 사용 능력 자체가 학생마다 다르니까, AI 활용을 허용하면 오히려 기존 불평등이 더 심해질 수도 있지 않을까? 이 부분에 대해선 어떻게 생각해?",
-        
-        "창의": "AI가 창의성을 높여준다는 건 어떤 상황에선 맞을 수 있지만, 수행평가에선 네가 스스로 얼마나 창의적으로 생각하는지 평가하는 게 중요하지 않을까? AI가 제안하는 아이디어에 의존하면 스스로 창의적 사고력을 키울 기회를 놓칠 수 있어. 또 AI는 기존 데이터를 기반으로 생성하기 때문에 정말 새롭고 혁신적인 아이디어보다는 이미 있는 패턴의 변형을 주로 만들어내는 경향이 있거든. 너는 이 부분에 대해 어떻게 생각해?",
-        
-        "역량": "AI 활용 자체를 새로운 역량으로 볼 수 있다는 건 일리가 있어. 하지만 수행평가는 각 과목의 특정 학습 목표를 얼마나 달성했는지 평가하는 게 목적이잖아. AI를 마음대로 쓰면 이런 핵심 역량 발달을 제대로 평가하기 어려울 것 같아. 예를 들어 수학 문제 해결 능력이나 글쓰기 능력 같은 교과 본연의 역량 개발이 방해받을 수 있지 않을까? 이 부분은 어떻게 생각해?"
-    }
-    
-    # 항복 여부에 따라 응답 선택
-    if is_surrender:
-        return random.choice(surrender_responses)
-    
-    # 맞춤형 응답 선택 (키워드 기반)
-    for keyword, response in specific_rebuttals.items():
-        if keyword in user_input.lower():
-            return response
-    
-    # 일반 응답 선택
-    return random.choice(general_rebuttals)
-
-# 토론 시작 함수
-def start_debate():
-    # 세션 상태 초기화
-    st.session_state[get_session_key('debate_started')] = True
-    st.session_state[get_session_key('start_time')] = datetime.now()
-    st.session_state[get_session_key('round_count')] = 0
-    st.session_state[get_session_key('ai_surrender')] = False
-    st.session_state[get_session_key('claude_messages')] = []
-    st.session_state[get_session_key('messages')] = []
-    st.session_state[get_session_key('repeated_arguments')] = []
-    
-    # 초기 메시지 설정
-    initial_ai_message = """안녕! 오늘은 'AI로 수행평가를 해도 될까?'라는 주제로 토론해보자. 나는 AI를 수행평가에 활용하는 건 좋지 않다고 생각해. AI를 활용하면 네가 진짜로 배운 것인지 확인하기 어렵고, 학습의 진짜 가치가 훼손될 수 있거든. 또 모든 친구들이 똑같은 AI를 쓸 수 있는 것도 아니라서 불공평한 상황이 생길 수도 있어. 너는 이 주제에 대해 어떻게 생각해? 편하게 얘기해줘."""
-    
-    st.session_state[get_session_key('messages')].append({"role": "assistant", "content": initial_ai_message})
-    st.session_state[get_session_key('claude_messages')].append({"role": "assistant", "content": initial_ai_message})
-
-# 메인 UI
-st.markdown("<div class='debate-header'><h1>🤖 인공지능으로 수행평가를 해도 될까?</h1></div>", unsafe_allow_html=True)
-
-# 세션 ID 표시 (디버깅용 - 필요시 주석 해제)
-# st.sidebar.write(f"세션 ID: {st.session_state.session_id}")
-
-# 토론 시작 버튼 (토론이 시작되지 않았을 때만 표시)
-if not st.session_state[get_session_key('debate_started')]:
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown("""
-        <div style="text-align: center; padding: 20px; background-color: #f5f5f5; border-radius: 10px; margin-bottom: 20px;">
-            <h3>토론 안내</h3>
-            <p>이 토론에서는 '인공지능으로 수행평가를 해도 될까?'라는 주제로 AI와 토론을 진행합니다.</p>
-            <p>당신은 <b>인공지능을 수행평가에 활용하는 것에 찬성하는 입장</b>을 취하게 됩니다.</p>
-            <p>토론은 약 30분간 진행되며, 상대방(AI)을 설득하는 것이 목표입니다.</p>
-            <p>충분히 설득력 있는 주장을 펼치면 AI가 항복할 수 있습니다.</p>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("토론 시작하기", key="start_debate"):
-            start_debate()
-            st.rerun()
-
-# 토론이 시작된 경우
-if st.session_state[get_session_key('debate_started')]:
-    # 타이머와 라운드 표시
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.markdown(f"<div class='timer'>⏱️ 경과 시간: {get_elapsed_time()}</div>", unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"<div class='round-indicator'>🔄 현재 라운드: {st.session_state[get_session_key('round_count')]}</div>", unsafe_allow_html=True)
-    
-    # 메시지 표시
-    for message in st.session_state[get_session_key('messages')]:
-        if message["role"] == "user":
-            st.markdown(f"<div class='user-message'><b>학생:</b> {message['content']}</div>", unsafe_allow_html=True)
-        else:
-            if "surrender" in message:
-                st.markdown(f"<div class='surrender-message'><b>AI:</b> {message['content']}</div>", unsafe_allow_html=True)
-            else:
-                st.markdown(f"<div class='ai-message'><b>AI:</b> {message['content']}</div>", unsafe_allow_html=True)
-    
-    # 항복 메시지가 표시된 후 토론 재시작 버튼
-    if st.session_state[get_session_key('ai_surrender')]:
-        if st.button("토론 다시 시작하기", key="restart_debate"):
-            st.session_state[get_session_key('messages')] = []
-            st.session_state[get_session_key('debate_started')] = False
-            st.session_state[get_session_key('ai_surrender')] = False
-            st.rerun()
-    
-    # 입력 필드 (항복하지 않았을 경우에만 표시)
-    if not st.session_state[get_session_key('ai_surrender')]:
-        # 입력 필드의 초기값을 위한 키 추가
-        if get_session_key('user_input') not in st.session_state:
-            st.session_state[get_session_key('user_input')] = ""
-            
-        user_input = st.text_area("당신의 주장을 입력하세요:", value=st.session_state[get_session_key('user_input')], height=150, key="input_field")
-        
-        if st.button("의견 제출", key="submit_opinion"):
-            if user_input.strip() != "":
-                # 사용자 메시지 추가
-                st.session_state[get_session_key('messages')].append({"role": "user", "content": user_input})
-                st.session_state[get_session_key('round_count')] += 1
-                
-                # 입력창 비우기
-                st.session_state[get_session_key('user_input')] = ""
-                
-                # 항복 조건 확인
-                if check_surrender_conditions():
-                    ai_response = get_ai_response(user_input, is_surrender=True)
-                    st.session_state[get_session_key('messages')].append({"role": "assistant", "content": ai_response, "surrender": True})
-                    st.session_state[get_session_key('ai_surrender')] = True
+                # 응답 파싱
+                if 'grounded' in ground_content.lower():
+                    result['is_grounded'] = True
+                    result['confidence'] = 0.85
+                elif 'partially' in ground_content.lower():
+                    result['is_grounded'] = True
+                    result['confidence'] = 0.5
                 else:
-                    # 일반 응답
-                    ai_response = get_ai_response(user_input)
-                    st.session_state[get_session_key('messages')].append({"role": "assistant", "content": ai_response})
+                    result['is_grounded'] = False
+                    result['confidence'] = 0.2
                 
-                # 페이지 새로고침
-                st.rerun()
+                result['explanation'] = ground_content
+            except Exception as e:
+                result['explanation'] = f"Groundedness Check 오류: {str(e)}"
+        else:
+            # Upstage API가 없는 경우 Perplexity 결과만으로 판단
+            if '사실' in search_results or '확인' in search_results or 'true' in search_results.lower():
+                result['is_grounded'] = True
+                result['confidence'] = 0.7
+            result['explanation'] = search_results
+        
+        # 출처 추출 (Perplexity 응답에서)
+        import re
+        urls = re.findall(r'https?://[^\s]+', search_results)
+        result['sources'] = urls[:3]  # 상위 3개 출처만
+        
+    except Exception as e:
+        result['explanation'] = f"팩트체크 중 오류 발생: {str(e)}"
+    
+    return result
+
+# 코칭 피드백 생성
+def generate_coaching_feedback(text: str, structure: Dict, clients: Dict) -> str:
+    """논증 구조에 대한 코칭 피드백 생성"""
+    
+    system_prompt = """당신은 학생들의 토론 논증을 코칭하는 전문 교사입니다.
+    
+역할:
+1. 학생의 논증 구조(주장-근거-보강자료)를 분석하고 개선점을 제시
+2. 논리적 연결성과 설득력을 강화하는 방법 제안
+3. 문장 구조와 표현을 더 명확하고 설득력 있게 개선
+4. 구체적인 예시와 함께 개선된 버전 제시
+
+피드백 구조:
+1. 현재 논증의 강점 인정
+2. 개선이 필요한 부분 지적
+3. 구체적인 개선 방법 제시
+4. 개선된 예시 제공
+
+말투: 친근하고 격려하는 톤으로, 학생의 노력을 인정하면서 발전 방향 제시"""
+
+    user_prompt = f"""학생의 논증을 분석하고 코칭해주세요:
+
+논증 내용: {text}
+
+현재 구조 분석:
+- 주장 포함: {structure['has_claim']}
+- 근거 포함: {structure['has_evidence']}  
+- 보강자료 포함: {structure['has_reinforcement']}
+
+다음 형식으로 피드백을 제공해주세요:
+
+📌 **논증 구조 평가**
+- 강점:
+- 개선점:
+
+💡 **구체적 개선 제안**
+1. 주장 부분:
+2. 근거 부분:
+3. 보강자료 부분:
+
+✨ **개선된 예시**
+(학생의 논증을 개선한 버전 제시)
+
+🎯 **다음 단계 제안**
+(학생이 다음에 집중해야 할 포인트)"""
+
+    if 'upstage' not in clients:
+        return "Upstage API 키가 설정되지 않았습니다."
+    
+    try:
+        response = clients['upstage'].chat.completions.create(
+            model="solar-pro2",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=1500
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"피드백 생성 중 오류가 발생했습니다: {str(e)}"
+
+# 주제별 가이드 제공
+def get_topic_guide(topic: str, position: str) -> str:
+    """토론 주제와 입장에 따른 가이드 제공"""
+    guide = f"""
+### 토론 주제: {topic}
+### 당신의 입장: {position}
+
+#### 효과적인 논증 구조 만들기:
+
+**1단계: 명확한 주장 (Claim)**
+- 당신의 입장을 한 문장으로 명확히 표현하세요
+- 예: "저는 {topic}에 대해 {position}합니다. 왜냐하면..."
+
+**2단계: 논리적 근거 (Evidence)**
+- 주장을 뒷받침하는 2-3개의 핵심 이유를 제시하세요
+- 각 이유는 구체적이고 측정 가능해야 합니다
+
+**3단계: 신뢰할 만한 보강자료 (Reinforcement)**
+- 통계, 연구 결과, 전문가 의견 등을 인용하세요
+- "~에 따르면"의 형식으로 출처를 명시하세요
+
+💡 **팁**: 상대방의 예상 반박을 미리 고려하여 대응 논리를 준비하세요!
+"""
+    return guide
+
+# 메인 앱
+def main():
+    st.markdown('<div class="main-header"><h1>🎓 토론 논증 코칭 챗봇</h1><p>체계적인 논증 구조를 만들어 설득력을 높이세요!</p></div>', unsafe_allow_html=True)
+    
+    # 세션 초기화
+    init_session_state()
+    
+    # API 클라이언트
+    clients = init_clients()
+    
+    if not clients:
+        st.error("⚠️ API 키가 설정되지 않았습니다. Streamlit Cloud 설정에서 UPSTAGE_API_KEY와 PERPLEXITY_API_KEY를 추가해주세요.")
+        return
+    
+    if 'upstage' not in clients:
+        st.warning("⚠️ Upstage API 키가 없습니다. 코칭 기능이 제한됩니다.")
+    
+    if 'perplexity' not in clients:
+        st.warning("⚠️ Perplexity API 키가 없습니다. 팩트체크 기능이 제한됩니다.")
+    
+    # 사이드바
+    with st.sidebar:
+        st.header("📋 토론 설정")
+        
+        # 토론 주제 입력
+        topic = st.text_input("토론 주제를 입력하세요:", 
+                              placeholder="예: 학교 교복 착용 의무화",
+                              value=st.session_state.debate_topic)
+        
+        if topic != st.session_state.debate_topic:
+            st.session_state.debate_topic = topic
+            st.session_state.messages = []
+        
+        # 입장 선택
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("👍 찬성", disabled=not topic):
+                st.session_state.user_position = "찬성"
+                st.session_state.coaching_started = True
+        with col2:
+            if st.button("👎 반대", disabled=not topic):
+                st.session_state.user_position = "반대"
+                st.session_state.coaching_started = True
+        
+        if st.session_state.user_position:
+            st.success(f"선택된 입장: {st.session_state.user_position}")
+        
+        st.markdown("---")
+        
+        # 진행 상태
+        st.header("📊 논증 완성도")
+        if st.session_state.argument_structure['claim']:
+            st.progress(0.33, "주장 ✓")
+        else:
+            st.progress(0.0, "주장 작성 필요")
+        
+        if st.session_state.argument_structure['evidence']:
+            st.progress(0.66, "근거 ✓")
+        else:
+            st.progress(0.33, "근거 추가 필요")
+        
+        if st.session_state.argument_structure['reinforcement']:
+            st.progress(1.0, "보강자료 ✓")
+        else:
+            st.progress(0.66, "보강자료 추가 필요")
+        
+        # 리셋 버튼
+        if st.button("🔄 새로운 토론 시작"):
+            for key in st.session_state.keys():
+                del st.session_state[key]
+            st.rerun()
+    
+    # 메인 컨텐츠
+    if not st.session_state.coaching_started:
+        st.info("👈 왼쪽 사이드바에서 토론 주제를 입력하고 입장을 선택하세요.")
+        
+        # 예시 토론 주제들
+        st.markdown("### 💡 토론 주제 예시")
+        example_topics = [
+            "인공지능을 활용한 수행평가",
+            "학교 내 스마트폰 사용",
+            "온라인 수업의 효과성",
+            "청소년 게임 시간 제한",
+            "학생 자치권 확대"
+        ]
+        
+        cols = st.columns(len(example_topics))
+        for idx, topic in enumerate(example_topics):
+            with cols[idx]:
+                if st.button(topic, key=f"example_{idx}"):
+                    st.session_state.debate_topic = topic
+                    st.rerun()
+    
+    else:
+        # 토론 가이드 표시
+        st.markdown(get_topic_guide(st.session_state.debate_topic, st.session_state.user_position))
+        
+        # 논증 구조 표시
+        st.markdown("### 📝 현재 논증 구조")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown('<div class="claim-box"><strong>🎯 주장</strong></div>', unsafe_allow_html=True)
+            if st.session_state.argument_structure['claim']:
+                st.write(st.session_state.argument_structure['claim'])
+            else:
+                st.write("*아직 작성되지 않음*")
+        
+        with col2:
+            st.markdown('<div class="evidence-box"><strong>📊 근거</strong></div>', unsafe_allow_html=True)
+            if st.session_state.argument_structure['evidence']:
+                for evidence in st.session_state.argument_structure['evidence']:
+                    st.write(f"• {evidence}")
+            else:
+                st.write("*아직 작성되지 않음*")
+        
+        with col3:
+            st.markdown('<div class="reinforcement-box"><strong>📚 보강자료</strong></div>', unsafe_allow_html=True)
+            if st.session_state.argument_structure['reinforcement']:
+                for reinforcement in st.session_state.argument_structure['reinforcement']:
+                    st.write(f"• {reinforcement}")
+            else:
+                st.write("*아직 작성되지 않음*")
+        
+        # 채팅 히스토리
+        st.markdown("### 💬 코칭 대화")
+        
+        # 메시지 표시
+        for message in st.session_state.messages:
+            if message["role"] == "user":
+                st.markdown(f'<div class="chat-message user-message"><strong>학생:</strong> {message["content"]}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="chat-message assistant-message"><strong>코치:</strong> {message["content"]}</div>', unsafe_allow_html=True)
+        
+        # 입력 폼
+        with st.form("argument_form", clear_on_submit=True):
+            user_input = st.text_area("논증을 작성하세요:", 
+                                     placeholder="주장, 근거, 보강자료를 포함하여 작성해보세요...",
+                                     height=150)
+            
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                submitted = st.form_submit_button("📤 제출하기", use_container_width=True)
+            with col2:
+                fact_check = st.form_submit_button("🔍 팩트체크", use_container_width=True)
+        
+        if submitted and user_input:
+            # 사용자 메시지 저장
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            
+            # 논증 구조 분석
+            structure = analyze_argument_structure(user_input)
+            
+            # 구조 업데이트
+            if structure['has_claim']:
+                st.session_state.argument_structure['claim'] = user_input.split('.')[0]
+            if structure['has_evidence']:
+                st.session_state.argument_structure['evidence'].append("근거 추출됨")
+            if structure['has_reinforcement']:
+                st.session_state.argument_structure['reinforcement'].append("보강자료 추출됨")
+            
+            # 코칭 피드백 생성
+            with st.spinner("코칭 피드백을 생성하는 중..."):
+                feedback = generate_coaching_feedback(user_input, structure, clients)
+                st.session_state.messages.append({"role": "assistant", "content": feedback})
+            
+            # 출처가 있는 경우 자동 팩트체크
+            if structure['sources']:
+                st.info(f"📌 출처 발견: {', '.join(structure['sources'])} - 자동 팩트체크를 수행합니다.")
+                # 여기에 팩트체크 로직 추가
+            
+            st.rerun()
+        
+        if fact_check and user_input:
+            # 팩트체크 수행
+            with st.spinner("Perplexity로 웹 검색 중... 잠시만 기다려주세요."):
+                # 출처 패턴 찾기
+                sources = re.findall(r'([가-힣A-Za-z0-9\s]+)(?:에 따르면|연구에서|조사 결과)', user_input)
+                
+                if sources or user_input:
+                    # 전체 텍스트 또는 특정 출처에 대해 팩트체크
+                    source_text = sources[0] if sources else ""
+                    
+                    # 주장 추출 (출처 이후 부분)
+                    claim_match = re.search(r'(?:에 따르면|연구에서|조사 결과)(.+)', user_input)
+                    claim = claim_match.group(1) if claim_match else user_input
+                    
+                    # Perplexity 팩트체크 수행
+                    fact_result = perplexity_fact_check(claim.strip(), source_text, clients)
+                    
+                    # 결과 표시
+                    st.markdown('<div class="fact-check-box"><strong>🔍 팩트체크 결과</strong></div>', unsafe_allow_html=True)
+                    
+                    # 신뢰도에 따른 아이콘 선택
+                    if fact_result['confidence'] >= 0.7:
+                        icon = "✅"
+                        status = "검증됨"
+                    elif fact_result['confidence'] >= 0.4:
+                        icon = "⚠️"
+                        status = "부분적으로 검증됨"
+                    else:
+                        icon = "❌"
+                        status = "검증 실패"
+                    
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        st.metric("검증 상태", status, f"{fact_result['confidence']*100:.0f}%")
+                    with col2:
+                        st.markdown(f"**{icon} 신뢰도:** {fact_result['confidence']*100:.0f}%")
+                    
+                    # Perplexity 검색 결과
+                    with st.expander("📊 웹 검색 결과 보기"):
+                        st.write(fact_result['search_results'])
+                        
+                        if fact_result['sources']:
+                            st.markdown("**🔗 참고 출처:**")
+                            for src in fact_result['sources']:
+                                st.write(f"- {src}")
+                    
+                    # Groundedness 검증 결과
+                    if fact_result['explanation'] and fact_result['explanation'] != fact_result['search_results']:
+                        with st.expander("🎯 Groundedness 검증 상세"):
+                            st.write(fact_result['explanation'])
+                    
+                    # 개선 제안
+                    if fact_result['confidence'] < 0.7:
+                        st.info("💡 **개선 제안:** 더 신뢰할 수 있는 출처를 인용하거나, 구체적인 통계나 연구 결과를 제시해보세요.")
+                else:
+                    st.warning("출처가 명시되지 않았습니다. '~에 따르면' 형식으로 출처를 포함해주세요.")
+
+if __name__ == "__main__":
+    main()
